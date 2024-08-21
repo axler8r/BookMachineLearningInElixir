@@ -1,0 +1,187 @@
+# Machine Learning Elixir — Chapter 3
+
+```elixir
+Mix.install(
+  [ {:axon, "~> 0.6"},
+    {:nx, "~> 0.7"},
+    {:torchx, "~> 0.7"},
+    # {:exla, "~> 0.7"},
+    {:explorer, "~> 0.9"},
+    {:kino, "~> 0.13"},
+    {:vega_lite, "~> 0.1.9"},
+    {:kino_vega_lite, "~> 0.1.8"}
+  ]
+)
+
+Nx.global_default_backend(Torchx.Backend)
+# Nx.Defn.global_default_options(compiler: EXLA)
+# Nx.global_default_backend(EXLA.Backend)
+
+```
+
+## Differentiation With Elixir NX
+
+The `BerryFarm` module define `profits/1` as $-(trees -1)^{4} + trees^{3} + trees^{2}$, i.e.
+
+$$
+\begin{align}
+\pi &= -(\tau - 1)^{4} + \tau^{3} + \tau^{2} \\
+
+```
+&= -\tau^{4} + 5\tau^{3} - 5\tau^{2} +4\tau - 1, \\
+&\text{Where }profits\text{ is }\pi\ (f(\tau))\text{ and }trees\text{ is }\tau
+```
+
+\end{align}
+$$
+
+The `profit/1` function's symbolic derivative is given by:
+
+$$
+-(\tau - 1)^{4} + \tau^{3} + \tau^{2} \frac{d\pi}{d\tau} = -4\tau^{3} + 15\tau^{2} - 10\tau + 4
+$$
+
+```elixir
+defmodule BerryFarm do
+  import Nx.Defn
+
+  defn profits(trees) do
+    # -((trees - 1) ** 4) + (trees ** 3) + (trees ** 2)
+    trees
+    |> Nx.subtract(1)
+    |> Nx.pow(4)
+    |> Nx.negate()
+    |> Nx.add(Nx.pow(trees, 3))
+    |> Nx.add(Nx.pow(trees, 2))
+  end
+
+  defn symbolic_derivative(trees), do: -4*trees**3 + 15*trees**2 - 10*trees + 4
+  defn grad(trees), do: grad(trees, &profits/1)
+end
+
+```
+
+Calculate the profits curve and it's derivative curve.
+
+```elixir
+trees = Nx.linspace(0.5, 3.5, n: 100)
+profits = BerryFarm.profits(trees)
+profits_derivative = BerryFarm.grad(trees)
+
+:ok
+
+```
+
+Compare the symbolic derivative to the `grad/1`. Notice that they are practically identical.
+
+```elixir
+profit_symbolic_derivative =
+  BerryFarm.symbolic_derivative(trees)
+  |> IO.inspect(label: :symbolic_derivative)
+profit_grad_derivative =
+  BerryFarm.grad(trees)
+  |> IO.inspect(label: :grad_derivative)
+
+:ok
+
+```
+
+Plot the profits curve and the profits derivative curve. Here the profits derivative curve was obtained with the `grad/1` function. Notice that the maximum profit coincides with the profits derivative curve being zero.
+
+> [!TODO]
+> Figure out how to mark the place where the derivative curve intersects the x axis.
+
+```elixir
+alias VegaLite, as: VL
+
+VL.new(title: "Berry Profits", width: 800, height: 600)
+|> VL.data_from_values(
+  %{
+    trees: Nx.to_flat_list(trees),
+    profits: Nx.to_flat_list(profits),
+    profits_derivative: Nx.to_flat_list(profits_derivative)
+  }
+)
+|> VL.layers(
+  [
+    VL.new()
+    |> VL.mark(:line, interpolate: :basis)
+    |> VL.encode_field(:x, "trees", type: :quantitative)
+    |> VL.encode_field(:y, "profits", type: :quantitative),
+    VL.new()
+    |> VL.mark(:line, interpolate: :basis)
+    |> VL.encode_field(:x, "trees", type: :quantitative)
+    |> VL.encode_field(:y, "profits_derivative", type: :quantitative)
+    |> VL.encode(:color, value: "#ff0000")
+  ]
+)
+
+```
+
+Here is an example of calculating the sum of series produced by a more complicated function.
+
+$$
+y = \sum_{i=1}^{n} e^{cos(x_{i})},\text{ where } x \in \{x_{1}, x_{2}, \dots, x_{n}\}, x_{i} \in \mathbb{R}
+$$
+
+First, calculate the sum as a number of `NX.tensor/x` operations.
+
+```elixir
+x = Nx.tensor([1.0, 2.0, 3.0])
+cos_x = Nx.cos(x) |> IO.inspect(label: :cos_x)
+e_cos_x = Nx.exp(cos_x) |> IO.inspect(label: :e_cos_x)
+sum = Nx.sum(e_cos_x) |> IO.inspect(label: :sum)
+
+:ok
+
+```
+
+Demonstrate, again, that `Nx.grad/1` is as effective at calculating the derivatef of a function as a hand-rolled derivative of the same function.
+
+```elixir
+defmodule GradFun do
+  import Nx.Defn
+  
+  defn my_function(x) do
+    x
+    |> Nx.cos()
+    |> Nx.exp()
+    |> Nx.sum()
+    |> print_expr()
+  end
+
+  defn symbolic_derivative_my_function(x) do
+    Nx.multiply(
+      x
+      |> Nx.sin()
+      |> Nx.negate(),
+      x
+      |> Nx.cos()
+      |> Nx.exp()
+    ) |> print_expr()
+  end
+
+  defn grad_my_function(x) do
+    grad(x, &my_function/1) |> print_expr()
+  end
+end
+
+```
+
+The symbolic derivative is given below:
+
+$$
+e^{cos(x)} \frac{d}{dx} = -sin(x) \cdot e^{cos(x)}
+$$
+
+Now compare the results of `Nx.grad/1` with `symbolic_derivative_my_function/1`. The results can be rewritten to be symbolically identical and is numerically identical.
+
+```elixir
+GradFun.symbolic_derivative_my_function(Nx.tensor([1.0, 2.0, 3.0]))
+|> IO.inspect(label: :symbolid_derivative)
+GradFun.grad_my_function(Nx.tensor([1.0, 2.0, 3.0]))
+|> IO.inspect(label: :grad)
+
+:ok
+
+```
