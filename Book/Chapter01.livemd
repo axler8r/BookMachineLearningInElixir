@@ -9,9 +9,11 @@ Mix.install(
     {:explorer, "~> 0.9"},
     {:kino, "~> 0.13"}
   ]
-  # system_env: %{"LIBTORCH_TARGET" => "cu122"}
-  # config: [nx: [default_backend: {EXLA.Backend, device: :cuda}]]
 )
+
+# Nx.global_default_backend(Torchx.Backend)
+# Nx.Defn.global_default_options(compiler: EXLA)
+Nx.global_default_backend(EXLA.Backend)
 
 ```
 
