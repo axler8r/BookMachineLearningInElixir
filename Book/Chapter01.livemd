@@ -19,40 +19,91 @@ Nx.global_default_backend(EXLA.Backend)
 
 ## Example of an Axon Workflow
 
-Make sure you can access the appropriate modules.
+There are some pitfalls when setting a default compiler for your application. To avoid these pitfalls, it’s recommended to only set a default backend, and then explicitly JIT-compile functions when you deem it necessary. I follow this pattern followed throughout the examples.
+
+<!-- livebook:{"break_markdown":true} -->
+
+### Requirements and Data
+
+<!-- livebook:{"break_markdown":true} -->
+
+I use `Explorer` to wrangle data. Have a look at the [project page](https://github.com/elixir-explorer/explorer) and read the [API Documentation](https://hexdocs.pm/explorer/Explorer.html).
 
 ```elixir
 require Explorer.DataFrame, as: DF
 
 ```
 
-
-```
-
-Set the global backend to use CUDA
-
-```elixir
-Nx.global_default_backend(Torchx.Backend)
-
-```
-
-<!-- livebook:{"output":true} -->
-
-```
-{Nx.BinaryBackend, []}
-```
-
-Get data
+`Explorer` has built in datasets, I will be using the _Iris_ dataset.
 
 ```elixir
 iris = Explorer.Datasets.iris()
 
 ```
 
-<!-- livebook:{"output":true} -->
+### Standardise and Shuffle Data
 
+I often encounter the term _normalising_ a dataset when it should be
+_standardising_ a dataset. What is the difference?
 
-Standardise and shuffle data
+#### Normalising Data
+
+Scale the dataset to an interval, typically $[0, 1]$ and sometimes $[-1, 1]$.
+The formula to scale data between $0$ and $1$ is given by:
+
+$$
+x_{i}' = \frac{x_{i} - min(x)}{max(x) - min(x)} \text{, scale dataset to } [0, 1]
+$$
+
+To scale data between $-1$ and $1$, use:
+
+$$
+x_{i}' = 2 \left( \frac{x_{i} - min(x)}{max(x) - min(x)} \right) - 1 \text{, scale dataset to } [-1, 1]
+$$
+
+which can be generalised to
+
+$$
+x_{i}' = 2x \left( \frac{x_{i} - min(x)}{max(x) - min(x)} \right) - x \text{, scale dataset to } [-x, x]
+$$
+
+This can be used across all distributions like multinomial, Poison, exponential,
+uniform and normal.
+
+#### Standardising Data
+
+Adjust the dataset to have a $\mu$ (mean) of $0$ and $\sigma$ (standard
+deviation) of $1$. The formula to accomplish this is given by:
+
+$$
+x_{i}' = \frac{x_{i} - \mu}{\sigma}
+$$
+
+This can also be used across all distributions but is most meaningful when the
+underlying data is already a normal distribution, that is, $X \sim
+\mathcal{N}(\mu, \sigma)$.
+
+NOTE:</br>
+The formula used in the book is neither _normalisation_ nor _standardisation_.
+**However**, the trained model inference accuracy is impressive when using the
+formula in the book. The _nosferatisation_ algorithm, as I call it, used is
+given by:
+
+$$
+x_{i}' = \frac{x_{i} - \mu}{\sigma_{2}}
+$$
+
+that is, it uses the _variance_ as the numerator instead of the _standard
+deviation_ as used in the regular standardisation algorithm. Here is a table
+showing the aproximate inference accuracy when using _standardisation_
+(STD), _standardisation_ + _normalisation_ (SNR) and _nosferatisation_ (NFR):
+
+| STD | SNR | NFR |
+| --: | --: | --: |
+| 86% | 80% | 93% |
+
+Uncomment &#9312;, &#9313; or all of &#9314; and rerun the cells to observe the
+results at the end of the notebook.
 
 ```elixir
 columns = ~W/sepal_width sepal_length petal_length petal_width/
@@ -60,12 +111,20 @@ shuffled_standardised_irises =
   iris
   |> DF.mutate(
     for column <- across(^columns) do
-      {column.name, (column - mean(column))/variance(column)}
+      {column.name, (column - mean(column))/variance(column)}             # (1)
+      # {column.name, (column - mean(column))/standard_deviation(column)} # (2)
     end
   )
+  # |> DF.mutate(                                                         # (3)
+  #   for c <- across(^columns) do                                        # (3)
+  #     {c.name, 2 * c * ((c - min(c)) / (max(c) - min(c))) - 1}          # (3)
+  #   end                                                                 # (3)
+  # )                                                                     # (3)
   |> DF.mutate(species: Explorer.Series.cast(species, :category))
   |> DF.shuffle()
+  |> dbg()
 
+:ok
 ```
 
 Make training and testing sets
@@ -80,17 +139,26 @@ Extract $\hat{y}_{train}$ and $\hat{y}_{test}$
 
 ```elixir
 features = ~W/sepal_width sepal_length petal_length petal_width/
-x_train = Nx.stack(train_irises[features], axis: -1)
+x_train =
+  train_irises[features]
+  |> Nx.stack(axis: -1)
+  |> dbg()
 y_train =
   train_irises["species"]
   |> Nx.stack(axis: -1)
   |> Nx.equal(Nx.iota({1, 3}, axis: -1))
-x_test = Nx.stack(test_irises[features], axis: -1)
+  |> dbg()
+x_test =
+  test_irises[features]
+  |> Nx.stack(axis: -1)
+  |>dbg()
 y_test =
   test_irises["species"]
   |> Nx.stack(axis: -1)
   |> Nx.equal(Nx.iota({1, 3}, axis: -1))
+  |> dbg()
 
+:ok
 ```
 
 Create a model
@@ -99,7 +167,9 @@ Create a model
 model =
   Axon.input("iris_features", shape: {nil, 4})
   |> Axon.dense(3, activation: :softmax)
+  |> dbg()
 
+:ok
 
 ```
 
@@ -125,6 +195,7 @@ trained_model =
   |> Axon.Loop.trainer(:categorical_cross_entropy, :sgd)
   |> Axon.Loop.metric(:accuracy)
   |> Axon.Loop.run(data_stream, %{}, iterations: 500, epochs: 10)
+  |> dbg()
 
 :ok
 
@@ -138,5 +209,6 @@ model
 |> Axon.Loop.evaluator()
 |> Axon.Loop.metric(:accuracy)
 |> Axon.Loop.run(data, trained_model)
+|> dbg()
 
 ```
