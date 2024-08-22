@@ -1,0 +1,280 @@
+# Data Visualisation
+
+```elixir
+Mix.install(
+  [
+    {:nx, "~> 0.7"},
+    # {:torchx, "~> 0.7"},
+    {:exla, "~> 0.6"},
+    {:axon, "~> 0.6"},
+    {:vega_lite, "~> 0.1.6"},
+    {:kino_vega_lite, "~> 0.1.10"},
+    {:table_rex, "~> 3.1.1"},
+    {:explorer, "~> 0.8"},
+    {:scholar, "~> 0.3"}
+  ],
+  # system_env: %{"LIBTORCH_TARGET" => "cu120"},
+  system_env: %{"XLA_TARGET" => "cuda120"}
+)
+
+# Nx.global_default_backend(Torchx.Backend)
+Nx.global_default_backend(EXLA.Backend)
+
+```
+
+## Aliases and Dependencies
+
+```elixir
+alias VegaLite, as: Vl
+require Explorer.DataFrame, as: DF
+
+```
+
+## Prepare Data for Visualisation
+
+```elixir
+iris_dataset = Explorer.Datasets.iris()
+iris_dataset =
+  iris_dataset
+  |> DF.mutate([species: Explorer.Series.cast(species, :category)])
+
+columns = ~w"sepal_length sepal_width petal_length petal_width"
+
+standardised_iris =
+  iris_dataset
+  |> DF.mutate(
+    for column <- across(^columns) do
+      {column.name, (column - mean(column)) / variance(column)}  
+    end
+  )
+
+```
+
+## Scatter Plot
+
+```elixir
+sepal_data = standardised_iris[["sepal_length", "sepal_width", "species"]]
+
+Vl.new(width: 800, height: 600)
+|> Vl.data_from_values(sepal_data)
+|> Vl.mark(:point, size: "120", filled: true)
+|> Vl.encode_field(:x, "sepal_length", type: :quantitative, title: "sepal length", scale: %{zero: false})
+|> Vl.encode_field(:y, "sepal_width", type: :quantitative, title: "sepal width", scale: %{zero: false})
+|> Vl.encode_field(:shape, "species", type: :nominal, scale: %{range: ["circle", "cross", "square"]})
+|> Vl.encode_field(:color, "species", type: :nominal, scale: %{range: ["blue", "red", "green"]})
+```
+
+## Faceted Scatter Plot
+
+```elixir
+sepal_data = standardised_iris[["sepal_length", "sepal_width", "species"]]
+
+Vl.new(width: 800, height: 600)
+|> Vl.data_from_values(sepal_data)
+|> Vl.facet([field: "species"], 
+  Vl.new()
+  |> Vl.mark(:point, size: "120", filled: true)
+  |> Vl.encode_field(:x, "sepal_length", type: :quantitative, title: "sepal length", scale: %{zero: false})
+  |> Vl.encode_field(:y, "sepal_width", type: :quantitative, title: "sepal width", scale: %{zero: false})
+  |> Vl.encode_field(:shape, "species", type: :nominal, scale: %{range: ["circle", "cross", "square"]})
+  |> Vl.encode_field(:color, "species", type: :nominal, scale: %{range: ["blue", "red", "green"]})
+)
+
+```
+
+## Multiple Scatter Plot
+
+```elixir
+Vl.new()
+|> Vl.data_from_values(standardised_iris)
+|> Vl.repeat(
+  [
+    row: [
+      "sepal_length",
+      "sepal_width",
+      "petal_length",
+      "petal_width"
+    ],
+    column: [
+      "petal_width",
+      "petal_length",
+      "sepal_width",
+      "sepal_length"
+    ]
+  ],
+  Vl.new(view: %{fill: "#13477d"})
+  |> Vl.mark(:point, filled: true)
+  |> Vl.encode_repeat(:x, :column, type: :quantitative, scale: %{zero: false})
+  |> Vl.encode_repeat(:y, :row, type: :quantitative, scale: %{zero: false})
+  |> Vl.encode_field(:shape, "species", type: :nominal, scale: %{range: ["circle", "cross", "square"]})
+  |> Vl.encode_field(:color, "species", type: :nominal, scale: %{range: ["#04c4ca", "#f3ce75", "#e2a099"]})
+)
+
+```
+
+## Prepare Data for Training
+
+```elixir
+features = [
+  "sepal_length",
+  "sepal_width",
+  "petal_length",
+  "petal_width"
+]
+
+x_train = Nx.stack(standardised_iris[features], axis: -1) 
+
+y_train = 
+  standardised_iris["species"]
+  |> Nx.stack(axis: -1)
+  |> Nx.equal(Nx.iota({1, 3}, axis: -1))
+
+data_stream = Stream.repeatedly(fn -> 
+  {x_train, y_train}  
+end)
+
+model =
+  Axon.input("iris_features", shape: {nil, 4})
+  |> Axon.dense(3, activation: :softmax)
+
+```
+
+```elixir
+loss = &Axon.Losses.categorical_cross_entropy(&1, &2, reduction: :mean)
+optimizer = Polaris.Optimizers.adam(learning_rate: 0.001)
+
+loop =
+  model
+  |> Axon.Loop.trainer(loss, optimizer)
+  |> Axon.Loop.metric(:accuracy)
+
+```
+
+```elixir
+output = fn state -> 
+  %{trained_state: state.step_state.model_state, metadata: state.handler_metadata}
+end
+
+loop = %{loop | output_transform: output}
+
+```
+
+```elixir
+metadata_collector = fn state ->
+  # Things we want to collect  
+  epoch = state.epoch
+  loss = Nx.to_number(state.step_state.loss)
+  accuracy = Nx.to_number(state.metrics["accuracy"])
+
+  # retrieve the data from the metadata if non exist fallback to []
+  # on 0 loop it will fallback and start with []
+  # on 1 loop it will load the existing
+  loss_history = state.handler_metadata[:loss_history] || []
+  accuracy_history = state.handler_metadata[:accuracy_history] || []
+  epoch_index = state.handler_metadata[:epoch_index] || []
+
+  # here we update the :handler_metadata with our own map
+  state = Map.put(state, :handler_metadata, %{
+    loss_history: loss_history ++ [loss], 
+    accuracy_history: accuracy_history ++ [accuracy],
+    epoch_index: epoch_index ++ [epoch]
+  })
+  
+  # return the state
+  {:continue, state}
+end
+
+loop =
+  loop # from the previous block
+  |> Axon.Loop.handle_event(:epoch_completed, metadata_collector)
+
+```
+
+```elixir
+initial_state = %{}
+
+output_state = 
+  Axon.Loop.run(loop, data_stream, initial_state, iterations: 300, epochs: 20)
+
+```
+
+```elixir
+Vl.new(width: 640, height: 480)
+|> Vl.data_from_values(output_state.metadata)
+|> Vl.mark(:line, color: "red", interpolate: "natural")
+|> Vl.encode_field(:x, "epoch_index", type: :quantitative, title: "Epoch")
+|> Vl.encode_field(:y, "loss_history", type: :quantitative, title: "Loss", scale: %{zero: false})
+```
+
+```elixir
+loss_layer = 
+  Vl.new()
+  |> Vl.mark(:line, color: "red", interpolate: "natural")
+  |> Vl.encode_field(:x, "epoch_index", type: :quantitative, title: "Epoch")
+  |> Vl.encode_field(:y, "loss_history", type: :quantitative, title: "Loss", scale: %{zero: false})
+
+accuracy_layer =
+  Vl.new()
+  |> Vl.mark(:line, interpolate: "natural")
+  |> Vl.encode_field(:x, "epoch_index", type: :quantitative, title: "Epoch")
+  |> Vl.encode_field(:y, "accuracy_history", type: :quantitative, title: "Accuracy", scale: %{zero: false})
+
+Vl.new(width: 640, height: 480)
+|> Vl.data_from_values(output_state.metadata)
+|> Vl.layers([loss_layer, accuracy_layer])
+
+```
+
+```elixir
+# initialize the chart
+chart = 
+  Vl.new(width: 640, height: 480)
+  |> Vl.mark(:line, color: "red", interpolate: "natural")
+  |> Vl.encode_field(:x, "epoch", type: :quantitative, title: "Epoch")
+  |> Vl.encode_field(:y, "loss", type: :quantitative, title: "Loss", scale: %{zero: false})
+  |> Kino.VegaLite.new()
+
+Kino.render(chart)
+
+metadata_plotter = fn state ->  
+  Kino.VegaLite.push(chart, %{
+    "epoch" => state.epoch, 
+    "loss" => Nx.to_number(state.step_state.loss)
+  })
+  
+  {:continue, state}
+end
+
+```
+
+```elixir
+initial_state = %{}
+
+loop =
+  loop
+  |> Axon.Loop.handle_event(:epoch_completed, metadata_plotter)
+
+output_state_2 = 
+  Axon.Loop.run(loop, data_stream, initial_state, iterations: 300, epochs: 20)
+
+```
+
+```elixir
+initial_state = %{}
+
+plot =
+  Vl.new(width: 800, height: 600)
+  |> Vl.mark(:line)
+  |> Vl.encode_field(:x, "step", type: :quantitative)
+  |> Vl.encode_field(:y, "accuracy", type: :quantitative) # swap to loss for the loss curve
+  |> Kino.VegaLite.new()
+  |> Kino.render()
+
+loop = 
+  model
+  |> Axon.Loop.trainer(loss, optimizer)
+  |> Axon.Loop.metric(:accuracy)  
+  |> Axon.Loop.kino_vega_lite_plot(plot, "accuracy") # swap to loss if you want the loss curve
+  |> Axon.Loop.run(data_stream, initial_state, iterations: 500, epochs: 10)
+
+```
